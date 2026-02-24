@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Malha de Corda Interativa</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: Inter, system-ui, sans-serif;
+        background: radial-gradient(circle at top, #151625 0%, #090a11 70%);
+      }
+      canvas {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+        cursor: grab;
+      }
+      canvas:active { cursor: grabbing; }
+      .hud {
+        position: fixed;
+        inset: 16px auto auto 16px;
+        background: rgba(10, 12, 22, 0.72);
+        border: 1px solid rgba(140, 155, 255, 0.35);
+        border-radius: 12px;
+        padding: 12px 14px;
+        color: #dce2ff;
+        max-width: 360px;
+        backdrop-filter: blur(6px);
+      }
+      .hud strong { color: #ffffff; }
+      .hud p {
+        margin: 0;
+        line-height: 1.4;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="net"></canvas>
+    <div class="hud">
+      <p><strong>Malha de rede física:</strong> passe o cursor para empurrar, segure e arraste para puxar. Arrastos muito fortes cortam as fibras.</p>
+    </div>
+
+    <script>
+      const canvas = document.getElementById('net');
+      const ctx = canvas.getContext('2d');
+
+      const pointer = {
+        x: 0,
+        y: 0,
+        px: 0,
+        py: 0,
+        vx: 0,
+        vy: 0,
+        down: false,
+        active: false,
+      };
+
+      let config = {
+        cols: 40,
+        rows: 22,
+        spacing: 28,
+        gravity: 0.44,
+        damping: 0.992,
+        mass: 1.15,
+        dragRadius: 78,
+        pushRadius: 115,
+        cutVelocity: 36,
+        cutStress: 1.9,
+        iterations: 5,
+      };
+
+      class Point {
+        constructor(x, y, pinned = false) {
+          this.x = x;
+          this.y = y;
+          this.oldX = x;
+          this.oldY = y;
+          this.pinned = pinned;
+          this.mass = config.mass;
+        }
+      }
+
+      class Link {
+        constructor(a, b, rest) {
+          this.a = a;
+          this.b = b;
+          this.rest = rest;
+          this.broken = false;
+        }
+      }
+
+      let points = [];
+      let links = [];
+
+      const texture = ctx.createPattern(createTexture(), 'repeat');
+
+      function createTexture() {
+        const patternCanvas = document.createElement('canvas');
+        patternCanvas.width = 52;
+        patternCanvas.height = 52;
+        const pctx = patternCanvas.getContext('2d');
+
+        pctx.fillStyle = '#25293f';
+        pctx.fillRect(0, 0, patternCanvas.width, patternCanvas.height);
+
+        pctx.strokeStyle = 'rgba(184, 193, 248, 0.28)';
+        pctx.lineWidth = 2;
+
+        for (let i = -52; i <= 104; i += 12) {
+          pctx.beginPath();
+          pctx.moveTo(i, 0);
+          pctx.lineTo(i + 52, 52);
+          pctx.stroke();
+
+          pctx.beginPath();
+          pctx.moveTo(i + 52, 0);
+          pctx.lineTo(i, 52);
+          pctx.stroke();
+        }
+
+        pctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        pctx.beginPath();
+        pctx.rect(1, 1, 50, 50);
+        pctx.stroke();
+
+        return patternCanvas;
+      }
+
+      function buildNet() {
+        points = [];
+        links = [];
+
+        const width = (config.cols - 1) * config.spacing;
+        const height = (config.rows - 1) * config.spacing;
+        const startX = (canvas.width - width) / 2;
+        const startY = Math.max(40, canvas.height * 0.12);
+
+        for (let y = 0; y < config.rows; y++) {
+          for (let x = 0; x < config.cols; x++) {
+            const px = startX + x * config.spacing;
+            const py = startY + y * config.spacing;
+            const pinned = y === 0 && x % 3 === 0;
+            points.push(new Point(px, py, pinned));
+          }
+        }
+
+        const idx = (x, y) => y * config.cols + x;
+        for (let y = 0; y < config.rows; y++) {
+          for (let x = 0; x < config.cols; x++) {
+            if (x < config.cols - 1) {
+              links.push(new Link(points[idx(x, y)], points[idx(x + 1, y)], config.spacing));
+            }
+            if (y < config.rows - 1) {
+              links.push(new Link(points[idx(x, y)], points[idx(x, y + 1)], config.spacing));
+            }
+            if (x < config.cols - 1 && y < config.rows - 1) {
+              links.push(new Link(points[idx(x, y)], points[idx(x + 1, y + 1)], config.spacing * Math.SQRT2));
+            }
+            if (x > 0 && y < config.rows - 1) {
+              links.push(new Link(points[idx(x, y)], points[idx(x - 1, y + 1)], config.spacing * Math.SQRT2));
+            }
+          }
+        }
+      }
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(window.innerWidth * dpr);
+        canvas.height = Math.floor(window.innerHeight * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        buildNet();
+      }
+
+      function updatePointer(event) {
+        const rect = canvas.getBoundingClientRect();
+        pointer.x = event.clientX - rect.left;
+        pointer.y = event.clientY - rect.top;
+        pointer.vx = pointer.x - pointer.px;
+        pointer.vy = pointer.y - pointer.py;
+        pointer.px = pointer.x;
+        pointer.py = pointer.y;
+        pointer.active = true;
+      }
+
+      function update() {
+        const speed = Math.hypot(pointer.vx, pointer.vy);
+
+        for (const p of points) {
+          if (p.pinned) continue;
+
+          const vx = (p.x - p.oldX) * config.damping;
+          const vy = (p.y - p.oldY) * config.damping;
+
+          p.oldX = p.x;
+          p.oldY = p.y;
+
+          p.x += vx;
+          p.y += vy + (config.gravity / p.mass);
+
+          if (pointer.active) {
+            const dx = pointer.x - p.x;
+            const dy = pointer.y - p.y;
+            const dist = Math.hypot(dx, dy) || 1;
+
+            if (dist < config.pushRadius) {
+              const force = (1 - dist / config.pushRadius) * 0.9;
+              p.x -= (dx / dist) * force * 1.1;
+              p.y -= (dy / dist) * force * 1.1;
+            }
+
+            if (pointer.down && dist < config.dragRadius) {
+              const drag = (1 - dist / config.dragRadius) * 0.28;
+              p.x += pointer.vx * drag;
+              p.y += pointer.vy * drag;
+            }
+          }
+        }
+
+        for (let i = 0; i < config.iterations; i++) {
+          for (const link of links) {
+            if (link.broken) continue;
+
+            const dx = link.b.x - link.a.x;
+            const dy = link.b.y - link.a.y;
+            const dist = Math.hypot(dx, dy) || 1;
+            const diff = (dist - link.rest) / dist;
+
+            const stretch = Math.abs(dist / link.rest);
+            if ((pointer.down && speed > config.cutVelocity && stretch > config.cutStress) || stretch > 2.8) {
+              link.broken = true;
+              continue;
+            }
+
+            const offsetX = dx * 0.5 * diff;
+            const offsetY = dy * 0.5 * diff;
+
+            if (!link.a.pinned) {
+              link.a.x += offsetX;
+              link.a.y += offsetY;
+            }
+            if (!link.b.pinned) {
+              link.b.x -= offsetX;
+              link.b.y -= offsetY;
+            }
+          }
+        }
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        grad.addColorStop(0, '#101426');
+        grad.addColorStop(1, '#07080f');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.strokeStyle = 'rgba(204, 215, 255, 0.65)';
+        ctx.lineWidth = 1.15;
+
+        for (const link of links) {
+          if (link.broken) continue;
+          ctx.beginPath();
+          ctx.moveTo(link.a.x, link.a.y);
+          ctx.lineTo(link.b.x, link.b.y);
+          ctx.stroke();
+        }
+
+        ctx.globalAlpha = 0.32;
+        ctx.fillStyle = texture || 'rgba(128, 145, 218, 0.24)';
+
+        const path = new Path2D();
+        const top = points.filter((_, i) => i < config.cols);
+        const right = [];
+        const left = [];
+
+        for (let y = 0; y < config.rows; y++) {
+          right.push(points[y * config.cols + (config.cols - 1)]);
+          left.unshift(points[y * config.cols]);
+        }
+        const bottom = points.slice((config.rows - 1) * config.cols).reverse();
+
+        const border = [...top, ...right, ...bottom, ...left];
+        if (border.length) {
+          path.moveTo(border[0].x, border[0].y);
+          for (let i = 1; i < border.length; i++) {
+            path.lineTo(border[i].x, border[i].y);
+          }
+          path.closePath();
+          ctx.fill(path);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function tick() {
+        update();
+        draw();
+        pointer.vx *= 0.88;
+        pointer.vy *= 0.88;
+        requestAnimationFrame(tick);
+      }
+
+      canvas.addEventListener('pointermove', updatePointer);
+      canvas.addEventListener('pointerdown', (event) => {
+        pointer.down = true;
+        updatePointer(event);
+      });
+      window.addEventListener('pointerup', () => {
+        pointer.down = false;
+      });
+      canvas.addEventListener('pointerleave', () => {
+        pointer.active = false;
+      });
+      window.addEventListener('resize', resize);
+
+      resize();
+      tick();
+    </script>
+  </body>
+</html>
